@@ -30,14 +30,22 @@ namespace Relocalizer
         internal static ConfigEntry<bool> loggingEnabled;
         internal static ConfigEntry<bool> overwriteDuplicates;
 
-        public static readonly CustomSyncedValue<Dictionary<string, Dictionary<string, string>>> relocalizedStrings = new CustomSyncedValue<Dictionary<string, Dictionary<string, string>>>(configSync, "Relocalized Strings", new Dictionary<string, Dictionary<string, string>>());
+        public static readonly CustomSyncedValue<Dictionary<string, Dictionary<string, string>>> relocalizedStrings = new CustomSyncedValue<Dictionary<string, Dictionary<string, string>>>(configSync, "Relocalized strings", new Dictionary<string, Dictionary<string, string>>());
+        public static readonly CustomSyncedValue<Dictionary<string, Dictionary<string, string>>> fixedItemsStrings = new CustomSyncedValue<Dictionary<string, Dictionary<string, string>>>(configSync, "Fixed Items strings", new Dictionary<string, Dictionary<string, string>>());
+        public static readonly CustomSyncedValue<Dictionary<string, Dictionary<string, string>>> fixedStatusEffectsStrings = new CustomSyncedValue<Dictionary<string, Dictionary<string, string>>>(configSync, "Fixed Status effects strings", new Dictionary<string, Dictionary<string, string>>());
+        public static readonly CustomSyncedValue<Dictionary<string, Dictionary<string, string>>> fixedHoverStrings = new CustomSyncedValue<Dictionary<string, Dictionary<string, string>>>(configSync, "Fixed Hoverable strings", new Dictionary<string, Dictionary<string, string>>());
+        public static readonly CustomSyncedValue<Dictionary<string, Dictionary<string, string>>> fixedGlobalStrings = new CustomSyncedValue<Dictionary<string, Dictionary<string, string>>>(configSync, "Fixed Global strings", new Dictionary<string, Dictionary<string, string>>());
 
-        public static string configDirectory;
-        internal static FileSystemWatcher configWatcher;
+        private static string configDirectory;
+        private static FileSystemWatcher configWatcher;
         private static float timeToReadConfigs = -1f;
 
-        private static string prefixCurrentLocalization = pluginID + ".CurrentLocalization";
-        private static string prefixUnlocalized = pluginID + ".Unlocalized";
+        private static readonly string prefixCurrentLocalization = pluginID + ".CurrentLocalization";
+        private static readonly string prefixUnlocalized = pluginID + ".Unlocalized";
+        private static readonly string prefixFixedItemsStrings = pluginID + ".FixedStrings.Items";
+        private static readonly string prefixFixedStatusEffectsStrings = pluginID + ".FixedStrings.StatusEffects";
+        private static readonly string prefixFixedHoverStrings = pluginID + ".FixedStrings.Hover";
+        private static readonly string prefixFixedGlobalStrings = pluginID + ".FixedStrings.Global";
 
         private void Awake()
         {
@@ -49,6 +57,7 @@ namespace Relocalizer
             _ = configSync.AddLockingConfigEntry(configLocked);
 
             relocalizedStrings.ValueChanged += new Action(Relocalize);
+            fixedGlobalStrings.ValueChanged += new Action(FixedStringsLocalization.OnLanguageChange);
 
             Game.isModded = true;
 
@@ -57,6 +66,8 @@ namespace Relocalizer
             SetupConfigWatcher();
 
             InitCommands();
+
+            FixedStringsLocalization.AddLanguageChangeAction();
         }
 
         public void ConfigInit()
@@ -82,6 +93,7 @@ namespace Relocalizer
 
         private void OnDestroy()
         {
+            FixedStringsLocalization.RemoveLanguageChangeAction();
             Config.Save();
             instance = null;
             harmony?.UnpatchSelf();
@@ -93,13 +105,18 @@ namespace Relocalizer
                 instance.Logger.LogInfo(data);
         }
 
+        public static void LogWarning(object data)
+        {
+            instance.Logger.LogWarning(data);
+        }
+
         public static void InitCommands()
         {
             new Terminal.ConsoleCommand("savecurrentlocalization", "[format] - Save current language dictionary", delegate (Terminal.ConsoleEventArgs args)
             {
                 string fileName = SaveLocalization(args.ArgsAll.Trim());
                 args.Context?.AddString($"Saved {fileName} file to config directory");
-            }, optionsFetcher: () => new List<string>() { "json", "yaml" });
+            }, optionsFetcher: () => new List<string>() { "yaml", "json" });
 
             new Terminal.ConsoleCommand("saveunlocalizedstrings", "[format] - Save language dictionary with strings not localized on current language", delegate (Terminal.ConsoleEventArgs args)
             {
@@ -112,7 +129,7 @@ namespace Relocalizer
                     string fileName = SaveUnlocalized(args.ArgsAll.Trim());
                     args.Context?.AddString($"Saved {fileName} file to config directory");
                 }
-            }, optionsFetcher: () => new List<string>() { "json", "yaml" });
+            }, optionsFetcher: () => new List<string>() { "yaml", "json" });
         }
 
         ConfigEntry<T> config<T>(string group, string name, T defaultValue, ConfigDescription description, bool synchronizedSetting = true)
@@ -149,7 +166,11 @@ namespace Relocalizer
 
         private static void ReadConfigs()
         {
-            Dictionary<string, Dictionary<string, string>> newValue = new Dictionary<string, Dictionary<string, string>>();
+            Dictionary<string, Dictionary<string, string>> newRelocalized = new Dictionary<string, Dictionary<string, string>>();
+            Dictionary<string, Dictionary<string, string>> newFixedItems = new Dictionary<string, Dictionary<string, string>>();
+            Dictionary<string, Dictionary<string, string>> newFixedStatusEffects = new Dictionary<string, Dictionary<string, string>>();
+            Dictionary<string, Dictionary<string, string>> newFixedGlobal = new Dictionary<string, Dictionary<string, string>>();
+            Dictionary<string, Dictionary<string, string>> newFixedHover = new Dictionary<string, Dictionary<string, string>>();
 
             foreach (FileInfo file in new DirectoryInfo(configDirectory).EnumerateFiles("*", SearchOption.AllDirectories).OrderBy(file => file.Name))
             {
@@ -177,20 +198,54 @@ namespace Relocalizer
                     continue;
                 }
 
+                Dictionary<string, Dictionary<string, string>> newValue = GetDict(file.Name);
+                if (newValue == null)
+                    continue;
+
                 if (!newValue.ContainsKey(language))
                     newValue[language] = dict;
                 else if (overwriteDuplicates.Value)
                     dict.Do(kvp => newValue[language][kvp.Key] = kvp.Value);
-                else 
+                else
                     newValue[language] = newValue[language].Concat(dict.Where(x => !newValue[language].Keys.Contains(x.Key))).ToDictionary(x => x.Key, x => x.Value);
 
                 LogInfo($"Loaded file {file.FullName.Replace(configDirectory, "").Substring(1)}.");
             }
 
-            relocalizedStrings.AssignValueSafe(newValue);
+            relocalizedStrings.AssignValueSafe(newRelocalized);
+            fixedItemsStrings.AssignValueSafe(newFixedItems);
+            fixedStatusEffectsStrings.AssignValueSafe(newFixedStatusEffects);
+            fixedHoverStrings.AssignValueSafe(newFixedHover);
+            fixedGlobalStrings.AssignValueSafe(newFixedGlobal);
 
-            foreach (KeyValuePair<string, Dictionary<string, string>> language in newValue)
-                LogInfo($"Language {language.Key} - loaded {language.Value.Count} keys.");
+            foreach (KeyValuePair<string, Dictionary<string, string>> language in newRelocalized)
+                LogInfo($"Language {language.Key} - loaded {language.Value.Count} relocalized keys.");
+
+            foreach (KeyValuePair<string, Dictionary<string, string>> language in fixedItemsStrings.Value)
+                LogInfo($"Language {language.Key} - loaded {language.Value.Count} fixed items strings.");
+            
+            foreach (KeyValuePair<string, Dictionary<string, string>> language in fixedStatusEffectsStrings.Value)
+                LogInfo($"Language {language.Key} - loaded {language.Value.Count} fixed status effects strings.");
+            
+            foreach (KeyValuePair<string, Dictionary<string, string>> language in fixedHoverStrings.Value)
+                LogInfo($"Language {language.Key} - loaded {language.Value.Count} fixed hover strings.");
+            
+            foreach (KeyValuePair<string, Dictionary<string, string>> language in fixedGlobalStrings.Value)
+                LogInfo($"Language {language.Key} - loaded {language.Value.Count} fixed global strings.");
+
+            Dictionary<string, Dictionary<string, string>> GetDict(string filename)
+            {
+                if (filename.StartsWith(prefixFixedItemsStrings))
+                    return newFixedItems;
+                else if (filename.StartsWith(prefixFixedStatusEffectsStrings))
+                    return newFixedStatusEffects;
+                else if (filename.StartsWith(prefixFixedHoverStrings))
+                    return newFixedHover;
+                else if (filename.StartsWith(prefixFixedGlobalStrings))
+                    return newFixedGlobal;
+
+                return null;
+            }
         }
 
         private static Dictionary<string, string> ReadConfigFile(string filename)
@@ -205,7 +260,7 @@ namespace Relocalizer
             }
             catch (Exception e)
             {
-                LogInfo($"Error reading file ({filename})! Error: {e.Message}");
+                LogWarning($"Error reading file ({filename})! Error: {e.Message}");
             }
 
             return null;
@@ -243,7 +298,7 @@ namespace Relocalizer
             }
             catch (Exception e)
             {
-                LogInfo($"Error saving file ({filename})! Error: {e.Message}");
+                LogWarning($"Error saving file ({filename})! Error: {e.Message}");
                 return "";
             }
 
@@ -268,7 +323,7 @@ namespace Relocalizer
             }
             catch (Exception e)
             {
-                LogInfo($"Error saving file ({filename})! Error: {e.Message}");
+                LogWarning($"Error saving file ({filename})! Error: {e.Message}");
                 return "";
             }
 
@@ -280,7 +335,6 @@ namespace Relocalizer
             if (!modEnabled.Value)
                 return;
 
-            LogInfo("Relocalize");
             string language = Localization.instance.GetSelectedLanguage();
             
             Localization.instance.SetLanguage(Localization.instance.GetNextLanguage(language));
@@ -305,7 +359,6 @@ namespace Relocalizer
             [HarmonyPriority(Priority.Last)]
             private static void Postfix(Localization __instance, string language)
             {
-                LogInfo("SetupLanguage");
                 AddTranslations(__instance, language);
             }
         }
